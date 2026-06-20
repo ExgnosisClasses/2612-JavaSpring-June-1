@@ -19,19 +19,25 @@ This lab is short and focused. It is meant to reinforce the architectural lesson
 
 - Lab 4.3 completed successfully, with a working consumer project
 - Lab 4.2 producer project still available (we will run it alongside the consumer)
-- Kafka 4.1.1 broker available at `C:\kafka` and ready to be started
-- The `transactions` topic exists on the broker
+- The three-broker Kafka cluster from Lab 4.1 available
+- The `transactions` topic exists on the cluster
 - Java 21 installed and on your `PATH`
 - IntelliJ IDEA Ultimate
 
-If your Kafka broker is not currently running, start it now in a Command Prompt window:
+If your Kafka cluster is not currently running, start it now:
 
 ```
-cd C:\kafka
-bin\windows\kafka-server-start.bat config\server.properties
+cd C:\kafka-docker
+docker compose up -d
 ```
 
-Wait for the line `[KafkaRaftServer nodeId=1] Kafka Server started` and leave the window open.
+Wait 30 to 60 seconds for all three brokers to come up, then verify:
+
+```
+docker compose ps
+```
+
+You should see `kafka1`, `kafka2`, and `kafka3` all showing state `Up`. Leave the cluster running for the rest of the lab.
 
 ## Section 1: Adding the File Collector
 
@@ -45,7 +51,9 @@ The file collector will write to `C:\kafka-data\transactions-output.csv`. Create
 mkdir C:\kafka-data
 ```
 
-We are using a neutral location outside the Kafka installation directory and outside the project. This avoids two common issues: permission problems with directories created by other users, and accidental version-control tracking of generated output files.
+We are using a neutral location outside the Kafka Docker directory and outside the project. This avoids two common issues: permission problems with directories created by other users, and accidental version-control tracking of generated output files.
+
+Note that this directory is separate from the Docker volumes used by the Kafka cluster. The CSV file is written by the consumer (running on the Windows host), not by anything inside a container.
 
 ### 1.2 Make the Console Collector Conditional
 
@@ -166,7 +174,7 @@ Walk through this carefully — there are several patterns worth understanding.
 
 **The `collect` method writes one CSV line per statistic.** Each line has three fields: a timestamp, the transaction type, and the amount. The timestamp is generated at write time (`Instant.now()`) rather than coming from the original transaction. In a real analytics use case you might use the transaction's own timestamp; for this lab the write time is fine and demonstrates a useful auditing pattern (when did the consumer process this?).
 
-**`writer.flush()` is called after every write.** Without this, lines would sit in the writer's internal buffer and only appear in the file when the buffer fills up or the writer closes. Flushing after each write means you can `type C:\kafka-data\transactions-output.csv` while the consumer is running and see fresh data. The performance cost is small for our one-event-per-second rate; for very high-throughput producers you would batch flushes instead.
+**`writer.flush()` is called after every write.** Without this, lines would sit in the writer's internal buffer and only appear in the file when the buffer fills up or the writer closes. Flushing after each write means you can `type` the file and see fresh content while the consumer is running. The performance cost is small for our one-event-per-second rate; for very high-throughput producers you would batch flushes instead.
 
 **The `@PreDestroy` annotation** registers the `close()` method as a Spring lifecycle callback. When the application shuts down (Ctrl+F2 in IntelliJ, Ctrl+C in a terminal, or a graceful shutdown signal), Spring will call this method before the bean is destroyed. This ensures the file writer is closed cleanly and any buffered data is flushed.
 
@@ -182,7 +190,7 @@ spring:
     name: transconsumer
 
   kafka:
-    bootstrap-servers: localhost:9092
+    bootstrap-servers: localhost:9092,localhost:9094,localhost:9096
     consumer:
       group-id: transconsumergroup
       auto-offset-reset: earliest
@@ -205,11 +213,13 @@ The `app.collector: file` setting tells Spring to use the `FileStatisticsCollect
 
 The `app:` prefix is an arbitrary choice for properties that belong to your application rather than to the Spring framework or to a library. By convention, application-specific properties are grouped under a prefix that identifies the application or feature area.
 
+Notice that the Kafka configuration is unchanged from Lab 4.3. The three-broker cluster setup, the JSON deserialization, and the consumer group are all the same. Only the output mechanism is being modified.
+
 ## Section 2: Running the End-to-End Flow
 
 ### 2.1 Confirm the Producer Is Available
 
-Open the Lab 4.2 producer project in a separate IntelliJ window. The Kafka broker should already be running.
+Open the Lab 4.2 producer project in a separate IntelliJ window. The three-broker Kafka cluster should already be running.
 
 ### 2.2 Start the Producer
 
@@ -320,7 +330,34 @@ This default behavior is a deliberate design choice: if a configuration value is
 
 Restore the `app.collector: file` setting before continuing.
 
-### 3.3 Sidebar: Kafka Connect
+### 3.3 Stop a Broker and Watch the File Keep Growing
+
+This exercise builds on the broker-failure exercise from Lab 4.1 and the one you tried in Lab 4.3, this time observing it from the file collector's perspective.
+
+With both producer and consumer running and the file collector active, open a Command Prompt:
+
+```
+cd C:\kafka-docker
+docker compose stop kafka2
+```
+
+Then watch the CSV file:
+
+```
+type C:\kafka-data\transactions-output.csv
+```
+
+After a brief pause (during which the cluster elects new leaders and the producer/consumer reconnect), new lines should continue being appended. The end-to-end pipeline — producer to Kafka cluster to consumer to CSV file — keeps working through the broker outage.
+
+The CSV file is just persistent storage on your local disk. The Kafka cluster is providing the durable transport between the producer and consumer, and the cluster's replication ensures that the data flowing through that pipeline is not lost when a broker goes down. Three brokers, replication factor 3, `min.insync.replicas=2`, and `acks=all` — the production-grade durability setup you configured in Lab 4.2 — all working together.
+
+Bring the broker back when you're done:
+
+```
+docker compose start kafka2
+```
+
+### 3.4 Sidebar: Kafka Connect
 
 What you have built in this lab is, in effect, a small custom version of what Kafka Connect's `FileStreamSinkConnector` does out of the box. Kafka Connect is a separate framework for moving data between Kafka and external systems without writing code. You configure it with a JSON file and run it as a separate process; it consumes from a topic and writes to a file (or database, or S3 bucket, or many other destinations) using pre-built connectors.
 
@@ -336,7 +373,7 @@ In a production system you would use Connect for the "boring" pipelines (ingest 
 
 ### 4.1 What to Leave Running
 
-You can stop the producer and consumer. The CSV file remains on disk and can be inspected anytime. The Kafka broker can be left running or stopped as you prefer.
+You can stop the producer and consumer. The CSV file remains on disk and can be inspected anytime. The Kafka cluster can be left running or stopped (with `docker compose down` to remove the containers, or `docker compose stop` to keep the data for a later session) as you prefer.
 
 ### 4.2 What You Have Learned
 
@@ -350,7 +387,7 @@ In this lab you have:
 
 The bigger takeaway is architectural. The Lab 4.3 design — interface plus implementations, listener depending on the interface — created a seam in the application. This lab plugged a new implementation into that seam without disturbing anything else. In a real codebase, this is what good design feels like in daily work: extensions land lightly, and the existing tests, behaviors, and assumptions hold.
 
-If a future lab adds an Oracle database insert, the change will look almost identical to this one. New collector class, new configuration value, listener unchanged.
+If a future lab adds a database insert, the change will look almost identical to this one. New collector class, new configuration value, listener unchanged.
 
 ### 4.3 Self-Check
 
@@ -363,6 +400,7 @@ Before moving on, you should be able to answer these questions:
 5. Why does the `collect` method call `writer.flush()` after every write?
 6. The listener class (`TransactionListener`) was not modified at all in this lab. What design decision in Lab 4.3 made that possible?
 7. If you wanted to add a third implementation that wrote to a database, what classes would you need to create or modify?
+8. The Kafka cluster configuration was not changed at all in this lab. Why is that significant? What does it tell you about the boundary between the Kafka concerns and the application concerns?
 
 If any of these are unclear, review the relevant section of the lab before continuing.
 

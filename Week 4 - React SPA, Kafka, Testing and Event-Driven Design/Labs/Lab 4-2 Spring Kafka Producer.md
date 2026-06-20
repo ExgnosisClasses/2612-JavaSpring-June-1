@@ -2,13 +2,13 @@
 
 ## Lab Overview
 
-In this lab you will build a Spring Boot application that produces a stream of transaction events to a Kafka topic. The application simulates an aggregator that collects transactions from many endpoints (ATMs, point-of-sale systems, online portals) and publishes each transaction as a Kafka event for downstream consumers to process.
+In this lab you will build a Spring Boot application that produces a stream of transaction events to a Kafka topic on the three-broker cluster you set up in Lab 4.1. The application simulates an aggregator that collects transactions from many endpoints (ATMs, point-of-sale systems, online portals) and publishes each transaction as a Kafka event for downstream consumers to process.
 
 The previous lab introduced Kafka at the command line, where you produced and consumed messages by typing into a terminal. This lab moves the producer side into a real Spring Boot application using Spring for Apache Kafka, while keeping the consumer side at the command line so you can verify what your producer is doing.
 
 By the end of this lab you will:
 
-- Create a Kafka topic suitable for transaction event traffic
+- Create a Kafka topic with production-grade replication settings
 - Build a Spring Boot Kafka producer using `KafkaTemplate`
 - Use a record type as your event payload, serialized as JSON
 - Configure the producer for durability and idempotency
@@ -21,43 +21,34 @@ This lab keeps the focus on the **producer** side of Spring Kafka. Lab 4.3 will 
 ## Prerequisites
 
 - Lab 4.1 completed successfully
-- Kafka 4.1.1 broker available at `C:\kafka` and ready to be started
+- The three-broker Kafka cluster from Lab 4.1 running in Docker
 - Java 21 installed and on your `PATH`
 - IntelliJ IDEA Ultimate
 - Internet access to use Spring Initializr (`start.spring.io`)
 
-If your Kafka broker is not currently running, start it now in a Command Prompt window:
+If your Kafka cluster is not currently running, start it now:
 
 ```
-cd C:\kafka
-bin\windows\kafka-server-start.bat config\server.properties
+cd C:\kafka-docker
+docker compose up -d
 ```
 
-Wait for the line `[KafkaRaftServer nodeId=1] Kafka Server started` and leave the window open. The remaining commands in this lab will be run in separate Command Prompt windows or inside IntelliJ.
-
-## A Note on the Two Warning Messages
-
-You will see the same two cosmetic warnings from Lab 4.1 throughout this lab:
+Wait 30 to 60 seconds for all three brokers to come up, then verify:
 
 ```
-2026-04-25T01:39:03.731487Z main ERROR Reconfiguration failed: No configuration found for '2c7b84de' at 'null' in 'null'
+docker compose ps
 ```
 
-```
-DEPRECATED: A Log4j 1.x configuration file has been detected, which is no longer recommended.
-```
-
-Ignore both. They are known cosmetic issues with Kafka 4.1.x on Windows and do not affect functionality.
+You should see `kafka1`, `kafka2`, and `kafka3` all showing state `Up`. Leave the cluster running for the rest of the lab.
 
 ## Section 1: Creating the Topic
 
 ### 1.1 Create the `transactions` Topic
 
-Open a new Command Prompt window. Change to the Kafka directory and create the topic:
+From `C:\kafka-docker`, create the topic using the CLI inside the `kafka1` container:
 
 ```
-cd C:\kafka
-bin\windows\kafka-topics.bat --create --topic transactions --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+docker compose exec kafka1 /opt/kafka/bin/kafka-topics.sh --create --topic transactions --bootstrap-server localhost:19092 --partitions 3 --replication-factor 3 --config min.insync.replicas=2
 ```
 
 You should see:
@@ -66,6 +57,12 @@ You should see:
 Created topic transactions.
 ```
 
+Let's break down the new options:
+
+- **`--replication-factor 3`** says there should be three copies of each partition, spread across the three brokers. This is the standard production replication factor and matches what you used in Lab 4.1.
+
+- **`--config min.insync.replicas=2`** sets a topic-level configuration: writes acknowledged with `acks=all` must be replicated to at least 2 of the 3 in-sync replicas before the broker confirms success. This is the production-grade durability setting we discussed in the course material. Combined with `acks=all` on the producer side (which you will configure shortly), this means data is durable even if one broker fails.
+
 The choice of three partitions is deliberate. With three partitions and a small set of account IDs as keys, you will be able to observe how Kafka's hash-based partitioning distributes events across partitions while keeping all events for the same account together on the same partition.
 
 ### 1.2 Verify the Topic
@@ -73,19 +70,19 @@ The choice of three partitions is deliberate. With three partitions and a small 
 Confirm the topic was created and inspect its layout:
 
 ```
-bin\windows\kafka-topics.bat --describe --topic transactions --bootstrap-server localhost:9092
+docker compose exec kafka1 /opt/kafka/bin/kafka-topics.sh --describe --topic transactions --bootstrap-server localhost:19092
 ```
 
 You should see output similar to:
 
 ```
-Topic: transactions   TopicId: ...   PartitionCount: 3   ReplicationFactor: 1   Configs:
-        Topic: transactions   Partition: 0    Leader: 1   Replicas: 1   Isr: 1   Elr:    LastKnownElr:
-        Topic: transactions   Partition: 1    Leader: 1   Replicas: 1   Isr: 1   Elr:    LastKnownElr:
-        Topic: transactions   Partition: 2    Leader: 1   Replicas: 1   Isr: 1   Elr:    LastKnownElr:
+Topic: transactions   TopicId: ...   PartitionCount: 3   ReplicationFactor: 3   Configs: min.insync.replicas=2
+        Topic: transactions   Partition: 0    Leader: 1   Replicas: 1,2,3   Isr: 1,2,3   Elr:    LastKnownElr:
+        Topic: transactions   Partition: 1    Leader: 2   Replicas: 2,3,1   Isr: 2,3,1   Elr:    LastKnownElr:
+        Topic: transactions   Partition: 2    Leader: 3   Replicas: 3,1,2   Isr: 3,1,2   Elr:    LastKnownElr:
 ```
 
-Three partitions, all led by broker 1 (your single broker). The topic is now ready to receive events.
+(Your specific leader assignments may differ.) Three partitions, each with three replicas spread across the three brokers, all in-sync. Leadership distributed across the brokers. The `min.insync.replicas=2` setting is shown in the Configs column. The topic is now ready to receive events.
 
 ### 1.3 Why This Design
 
@@ -93,7 +90,9 @@ A few notes on the design choices, which you can refer back to as you build the 
 
 **Three partitions** gives Kafka room to spread incoming traffic across multiple independent storage areas. In a production system with multiple consumer instances, partitions also enable parallel processing.
 
-**Replication factor 1** is appropriate for a single-broker classroom setup. In production you would typically use 3.
+**Replication factor 3** is the standard production value, ensuring that data is held by three brokers and the cluster can tolerate the loss of any one broker without data loss.
+
+**`min.insync.replicas=2`** combined with the producer's `acks=all` setting means that writes are only acknowledged when at least 2 brokers have received the data. This gives the producer a strong durability guarantee: an acknowledged write is on at least 2 disks.
 
 **Topic name `transactions`** uses a simple noun. In a larger system you might use a more structured name like `banking.transactions.recorded`, but for a single-team lab the simple name is fine.
 
@@ -177,7 +176,7 @@ spring:
     name: transproducer
 
   kafka:
-    bootstrap-servers: localhost:9092
+    bootstrap-servers: localhost:9092,localhost:9094,localhost:9096
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
@@ -197,13 +196,15 @@ A walkthrough of what each setting does:
 
 This pattern is common in real systems: many Spring Boot applications are not web applications, but rather background workers that process events, run scheduled jobs, or publish to queues. The Spring Web dependency is still useful for these applications because it brings in shared infrastructure like Jackson, but the embedded server itself is overhead. `web-application-type: none` is the standard way to declare "I am a service worker, not a web app."
 
-**`bootstrap-servers: localhost:9092`** tells the producer where to find the Kafka cluster. It connects to one broker initially, fetches cluster metadata, and then routes individual produce requests to the appropriate partition leaders.
+**`bootstrap-servers: localhost:9092,localhost:9094,localhost:9096`** tells the producer where to find the Kafka cluster. All three brokers are listed because the producer is running on the Windows host and reaches the brokers via the host port mappings on the HOST listener. Listing all three is best practice: if the first broker is unavailable when the producer starts, it can bootstrap via either of the other two. After the initial connection, the producer fetches cluster metadata and connects directly to the partition leaders.
+
+Note that this is different from the bootstrap address used by the CLI tools running inside the broker containers in Section 1, which used `localhost:19092` (the INTERNAL listener). The Spring application is an external client and uses the HOST listener addresses.
 
 **`key-serializer`** is set to `StringSerializer` because we will use account IDs (strings) as keys.
 
 **`value-serializer`** is `JsonSerializer`, which uses Jackson to convert your event objects to JSON byte arrays. This is the most common choice for development.
 
-**`acks: all`** means the producer waits for the partition leader and all in-sync replicas to acknowledge the write before considering it successful. Combined with idempotence, this is the standard production durability configuration. Even though our single-broker setup has no followers to wait for, configuring this correctly establishes the right habit.
+**`acks: all`** means the producer waits for the partition leader and all in-sync replicas to acknowledge the write before considering it successful. Combined with the topic's `min.insync.replicas=2` setting and replication factor 3, this gives you the production-grade durability guarantee: every acknowledged write has been replicated to at least 2 brokers. If one broker fails, no data is lost.
 
 **`enable.idempotence: true`** tells the producer to assign sequence numbers to records and tells the broker to deduplicate retries. Without this, network blips that trigger producer retries could cause duplicate records.
 
@@ -430,7 +431,7 @@ Note that we are creating the `TransactionGenerator` directly with `new` rather 
 
 You are now ready to run the application. In IntelliJ, open `TransproducerApplication.java` and click the green run arrow next to the `main` method.
 
-You should see Spring Boot start up. Because of the `web-application-type: none` setting, no embedded Tomcat will be started and you will not see any "Tomcat started on port 8080" messages. Within a second or two of startup, log lines should begin appearing:
+You should see Spring Boot start up. Because of the `web-application-type: none` setting, no embedded Tomcat will be started and you will not see any "Tomcat started on port 8080" messages. The producer will connect to the Kafka cluster, fetch metadata about the `transactions` topic, and start publishing. Within a second or two of startup, log lines should begin appearing:
 
 ```
 Sent 6f8a3c4d-... A-007 PURCHASE 247.32 -> partition 1, offset 0
@@ -450,6 +451,10 @@ Take a moment to study the output. Look at the partition assignments:
 
 This is per-key partitioning in action. The producer is hashing each `accountId` and using the result to choose a partition deterministically. Because the hash is deterministic, the same account always maps to the same partition.
 
+#### A Note on Partition Distribution
+
+With only 10 account IDs and 3 partitions, some accounts will land on the same partition as others. That is normal: the hash space is divided into 3 buckets, and 10 keys necessarily share some buckets. What matters for ordering is that each individual account's events all go to the same bucket, which they do.
+
 Leave the producer running in IntelliJ.
 
 ## Section 3: Verifying with the Console Consumer
@@ -458,15 +463,21 @@ Now you will use the command-line console consumer from Lab 4.1 to read the mess
 
 ### 3.1 Start the Console Consumer
 
-Open a new Command Prompt window (separate from the broker and any IntelliJ-related windows):
+Open a new Command Prompt window. Change to the Kafka Docker directory:
 
 ```
-cd C:\kafka
-bin\windows\kafka-console-consumer.bat --topic transactions --bootstrap-server localhost:9092 --from-beginning --property "print.partition=true" --property "print.key=true" --property "key.separator= | "
+cd C:\kafka-docker
 ```
 
-This is the same command you used at the end of Lab 4.1, with the topic changed to `transactions`. Breakdown of the options:
+Start the console consumer for the `transactions` topic:
 
+```
+docker compose exec kafka1 /opt/kafka/bin/kafka-console-consumer.sh --topic transactions --bootstrap-server localhost:19092 --from-beginning --property "print.partition=true" --property "print.key=true" --property "key.separator= | "
+```
+
+This is the same pattern you used at the end of Lab 4.1, with the topic changed to `transactions`. Breakdown of the options:
+
+- **`--bootstrap-server localhost:19092`** is the INTERNAL listener port, used because the consumer is running inside the `kafka1` container. Recall that this is different from the producer's bootstrap addresses (the HOST listener ports `9092`, `9094`, `9096`), which the producer uses because it runs on the Windows host.
 - **`--from-beginning`** tells the consumer to start reading from offset 0 rather than from the latest offset. This way, you see all the messages your producer has sent so far, not just new ones.
 - **`print.partition=true`** prefixes each line with the partition the message came from.
 - **`print.key=true`** shows the message key (the account ID) alongside the value.
@@ -503,7 +514,7 @@ Take a few minutes to watch the output and confirm these properties:
 While the producer is still running, stop the consumer with Ctrl+C. Wait a few seconds (during which the producer continues sending), then restart the consumer **without** the `--from-beginning` flag:
 
 ```
-bin\windows\kafka-console-consumer.bat --topic transactions --bootstrap-server localhost:9092 --property "print.partition=true" --property "print.key=true" --property "key.separator= | "
+docker compose exec kafka1 /opt/kafka/bin/kafka-console-consumer.sh --topic transactions --bootstrap-server localhost:19092 --property "print.partition=true" --property "print.key=true" --property "key.separator= | "
 ```
 
 This time the consumer starts at the *latest* offset on each partition. You will see only new transactions, not the ones produced while the consumer was stopped. The events produced during the gap are still in Kafka's storage on disk; the consumer just chose to start from the head of the log instead of the beginning.
@@ -514,7 +525,7 @@ This demonstrates that the producer and consumer are fully decoupled in time. Th
 
 When you are done observing, stop the producer by clicking the red stop button in IntelliJ (or pressing Ctrl+F2 in IntelliJ). The producer will shut down cleanly, the scheduler will stop firing, and any in-flight sends will complete.
 
-You can leave the consumer running and the broker running for the next section, or stop them as well.
+You can leave the consumer running and the broker cluster running for the next section, or stop them as well.
 
 ## Section 4: Optional Exploration
 
@@ -543,16 +554,16 @@ When you are done experimenting, change the key back to `transaction.accountId()
 While the producer is running and using `accountId` as the key, run this command in a third Command Prompt window:
 
 ```
-bin\windows\kafka-get-offsets.bat --topic transactions --bootstrap-server localhost:9092
+docker compose exec kafka1 /opt/kafka/bin/kafka-get-offsets.sh --topic transactions --bootstrap-server localhost:19092
 ```
 
 This shows the current end offset for each partition. Run it a few times over 30 seconds and watch the offsets advance. You will see that the partitions advance at slightly different rates depending on how many of your 10 account IDs hash to each one.
 
 ### 4.3 Restart the Producer
 
-Stop the producer in IntelliJ, then start it again. Watch the offsets in the producer's log. The first transaction's offset for each partition will not be 0 anymore: it will continue from wherever the previous run left off. This is because the broker is keeping the existing log on disk.
+Stop the producer in IntelliJ, then start it again. Watch the offsets in the producer's log. The first transaction's offset for each partition will not be 0 anymore: it will continue from wherever the previous run left off. This is because the cluster is keeping the existing log on disk.
 
-If you wanted to start from a clean slate, you would need to delete the broker's data and reformat the storage, as covered in the optional Section 1.3 of Lab 4.1. But remember the warning: do not run topic deletion commands on this lab setup.
+If you wanted to start from a clean slate, you would need to recreate the cluster from scratch (`docker compose down` followed by `docker compose up -d` and then recreating the topic). But remember the warning: do not run topic deletion commands on this lab setup.
 
 ## Section 5: Wrapping Up
 
@@ -560,8 +571,8 @@ If you wanted to start from a clean slate, you would need to delete the broker's
 
 For the next lab you will need:
 
-- The Kafka broker still running (or be prepared to restart it)
-- The `transactions` topic — it persists as long as the broker's storage is intact
+- The three-broker Kafka cluster still running (or be prepared to start it)
+- The `transactions` topic — it persists as long as the cluster's storage is intact
 
 You can stop the producer (it will not be reused; Lab 4.3 will create a different application).
 
@@ -571,10 +582,11 @@ You can close the consumer; you will not need it for Lab 4.3.
 
 In this lab you have:
 
+- Created a Kafka topic with production-grade replication settings (RF 3, `min.insync.replicas=2`)
 - Configured a Spring Boot application with Spring for Apache Kafka
 - Configured the application to run as a service worker rather than a web application
 - Defined an event payload using a Java record with proper types (`BigDecimal`, `Instant`)
-- Configured a producer for durable, idempotent delivery
+- Configured a producer for durable, idempotent delivery against a three-broker cluster
 - Used `KafkaTemplate` to publish events asynchronously
 - Used the `whenComplete` callback to observe partition and offset assignment in real time
 - Used `accountId` as the message key to demonstrate per-entity ordering
@@ -590,10 +602,11 @@ Before moving on to Lab 4.3, you should be able to answer these questions:
 2. What would happen if you increased the partition count of the `transactions` topic from 3 to 6 while the producer was running?
 3. Why is `BigDecimal` used for the `amount` field instead of `double`?
 4. What does the `whenComplete` callback receive on success, and what does it receive on failure?
-5. Why is `acks=all` combined with `enable.idempotence=true` the recommended production setting for the producer?
+5. Why is `acks=all` combined with `enable.idempotence=true` the recommended production setting for the producer? How does the topic's `min.insync.replicas=2` setting relate to these?
 6. What happens to events produced while a consumer is stopped, and why?
 7. Why did we declare the `KafkaTemplate` field as `KafkaTemplate<String, Object>` rather than `KafkaTemplate<String, Transaction>`?
 8. What does `spring.main.web-application-type: none` do, and why is it appropriate for this producer application?
+9. The Spring producer uses `localhost:9092,localhost:9094,localhost:9096` as its bootstrap servers, but the CLI consumer inside the container uses `localhost:19092`. Why are they different?
 
 If any of these are unclear, review the relevant section of the lab before continuing.
 

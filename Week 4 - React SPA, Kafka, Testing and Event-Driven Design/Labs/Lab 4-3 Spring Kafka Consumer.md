@@ -2,9 +2,9 @@
 
 ## Lab Overview
 
-In this lab you will build a Spring Boot application that consumes the transaction events your Lab 4.2 producer is publishing to the `transactions` topic. The consumer simulates an analytics service that collects per-transaction statistics. For each transaction received, the consumer extracts the transaction type and amount and hands the resulting statistic to a printing service. In the next lab you will swap that printing service for one that writes to an Oracle database, but the listener and the rest of the application will not need to change.
+In this lab you will build a Spring Boot application that consumes the transaction events your Lab 4.2 producer is publishing to the `transactions` topic on the three-broker Kafka cluster. The consumer simulates an analytics service that collects per-transaction statistics. For each transaction received, the consumer extracts the transaction type and amount and hands the resulting statistic to a printing service. In the next lab you will swap that printing service for one that writes to a CSV file, but the listener and the rest of the application will not need to change.
 
-This lab treats Lab 4.2 as a prerequisite. The producer you built in that lab will run alongside this consumer, and you will see end-to-end flow from the producer, through Kafka, to your consumer's transformation and output.
+This lab treats Lab 4.2 as a prerequisite. The producer you built in that lab will run alongside this consumer, and you will see end-to-end flow from the producer, through the three-broker Kafka cluster, to your consumer's transformation and output.
 
 By the end of this lab you will:
 
@@ -16,39 +16,31 @@ By the end of this lab you will:
 - Observe the partition, key, and offset of each received message
 - Run the producer and consumer simultaneously and watch the end-to-end flow
 
-This lab keeps the focus on the **consumer** side of Spring Kafka. Lab 4.4 will replace the printing service with a database insert.
+This lab keeps the focus on the **consumer** side of Spring Kafka. Lab 4.4 will replace the printing service with a file-writing service.
 
 ## Prerequisites
 
 - Lab 4.2 completed successfully, with a working producer project
-- Kafka 4.1.1 broker available at `C:\kafka` and ready to be started
-- The `transactions` topic exists on the broker
+- The three-broker Kafka cluster from Lab 4.1 available
+- The `transactions` topic exists on the cluster (created in Lab 4.2)
 - Java 21 installed and on your `PATH`
 - IntelliJ IDEA Ultimate
 - Internet access to use Spring Initializr (`start.spring.io`)
 
-If your Kafka broker is not currently running, start it now in a Command Prompt window:
+If your Kafka cluster is not currently running, start it now:
 
 ```
-cd C:\kafka
-bin\windows\kafka-server-start.bat config\server.properties
+cd C:\kafka-docker
+docker compose up -d
 ```
 
-Wait for the line `[KafkaRaftServer nodeId=1] Kafka Server started` and leave the window open.
-
-## A Note on the Two Warning Messages
-
-The same two cosmetic warnings from previous labs will appear:
+Wait 30 to 60 seconds for all three brokers to come up, then verify:
 
 ```
-2026-04-25T01:39:03.731487Z main ERROR Reconfiguration failed: No configuration found for '2c7b84de' at 'null' in 'null'
+docker compose ps
 ```
 
-```
-DEPRECATED: A Log4j 1.x configuration file has been detected, which is no longer recommended.
-```
-
-Ignore both. They are known cosmetic issues with Kafka 4.1.x on Windows and do not affect functionality.
+You should see `kafka1`, `kafka2`, and `kafka3` all showing state `Up`. Leave the cluster running for the rest of the lab.
 
 ## Section 1: Building the Spring Boot Consumer
 
@@ -112,7 +104,7 @@ spring:
     name: transconsumer
 
   kafka:
-    bootstrap-servers: localhost:9092
+    bootstrap-servers: localhost:9092,localhost:9094,localhost:9096
     consumer:
       group-id: transconsumergroup
       auto-offset-reset: earliest
@@ -130,11 +122,9 @@ logging:
 
 A walkthrough of what each setting does:
 
-**`spring.main.web-application-type: none`** tells Spring Boot not to start an embedded web server. The Spring Web dependency we included brings in Tomcat, but we do not need a web server for a consumer service: it has no HTTP endpoints, accepts no web requests, and serves no user traffic. Disabling the web server avoids port conflicts when running multiple Spring Boot Kafka applications on the same machine (such as the producer and consumer in this lab), starts the application faster, and produces cleaner startup logs.
+**`spring.main.web-application-type: none`** tells Spring Boot not to start an embedded web server. The same reasoning applies as in the producer: this is a service worker, not a web application. Disabling the embedded Tomcat avoids port conflicts (especially important when running this consumer alongside the producer on the same machine), starts the application faster, and produces cleaner startup logs.
 
-This pattern is common in real systems: many Spring Boot applications are not web applications, but rather background workers that process events, run scheduled jobs, or consume from queues. The Spring Web dependency is still useful for these applications because it brings in shared infrastructure like Jackson, but the embedded server itself is overhead. `web-application-type: none` is the standard way to declare "I am a service worker, not a web app."
-
-**`bootstrap-servers: localhost:9092`** is the broker address, identical to the producer's setting.
+**`bootstrap-servers: localhost:9092,localhost:9094,localhost:9096`** is the same address list the producer used. All three brokers are listed because the consumer is running on the Windows host and connects via the HOST listener port mappings. Listing all three is best practice: if the first broker is unavailable when the consumer starts, it can bootstrap via either of the other two. After the initial connection, the consumer fetches cluster metadata and connects directly to the partition leaders.
 
 **`group-id: transconsumergroup`** is the consumer group identity. All consumers that share this group ID cooperate to read the topic, with Kafka assigning each partition to exactly one group member. We will use this when running multiple consumer instances in the optional exploration.
 
@@ -224,7 +214,7 @@ public interface StatisticsCollector {
 }
 ```
 
-This interface is the seam between the listener (which knows about Kafka and transformation) and the output destination (which knows about how the statistic is recorded). The listener will depend on this interface, not on any specific implementation. In the next lab, you will replace the implementation with one that writes to a database, and the listener will not need to change.
+This interface is the seam between the listener (which knows about Kafka and transformation) and the output destination (which knows about how the statistic is recorded). The listener will depend on this interface, not on any specific implementation. In the next lab, you will replace the implementation with one that writes to a file, and the listener will not need to change.
 
 This pattern (an interface with one or more implementations) is sometimes called "dependency inversion" or simply "programming to an interface." It is a standard practice in well-structured Spring applications.
 
@@ -307,7 +297,7 @@ This is the most important class in the lab. Walk through it carefully.
 
 **The `@Service` annotation** registers the class as a Spring bean.
 
-**The constructor takes `StatisticsCollector`** (the interface, not the concrete class). Spring's dependency injection finds the `ConsoleStatisticsCollector` bean and injects it. If you later replace `ConsoleStatisticsCollector` with a database collector, this constructor parameter does not change.
+**The constructor takes `StatisticsCollector`** (the interface, not the concrete class). Spring's dependency injection finds the `ConsoleStatisticsCollector` bean and injects it. If you later replace `ConsoleStatisticsCollector` with a file-writing collector, this constructor parameter does not change.
 
 **The `@KafkaListener(topics = "transactions")` annotation** registers this method with Spring Kafka's listener container. The container runs a poll loop in the background and calls this method once per received record. From the application's point of view, this method is the handler that reacts to incoming events. From Kafka's point of view, this consumer is a member of the `transconsumergroup` consumer group, and it is reading whichever partitions the group coordinator has assigned to it.
 
@@ -350,7 +340,7 @@ For this section you need both the producer (from Lab 4.2) and the consumer (fro
 
 Open the Lab 4.2 producer project (`transproducer`) in a separate IntelliJ window. If you closed it after the previous lab, simply reopen it now.
 
-The Kafka broker should already be running. If not, start it as described at the top of this lab.
+The three-broker Kafka cluster should already be running. If not, start it as described at the top of this lab.
 
 ### 2.2 Start the Producer
 
@@ -403,7 +393,7 @@ While both applications are running, take a few minutes to study the output:
 
 While the producer continues to run, stop the consumer in IntelliJ. Wait a few seconds. Then start the consumer again.
 
-This time you will **not** see the historical replay. The consumer remembers where it left off (its committed offsets are stored in the broker's `__consumer_offsets` topic) and resumes from there. You will see only the transactions produced during the gap and any new ones since.
+This time you will **not** see the historical replay. The consumer remembers where it left off (its committed offsets are stored in the cluster's `__consumer_offsets` topic, replicated across all three brokers) and resumes from there. You will see only the transactions produced during the gap and any new ones since.
 
 This demonstrates the core consumer-group behavior: the group ID is the consumer's identity, and its progress is durable across restarts. If you wanted to replay history, you would need to either reset the group's offsets explicitly or use a different group ID.
 
@@ -443,8 +433,8 @@ When you are done experimenting, change the group ID back to `transconsumergroup
 While your consumer is running (or after it has run), use the CLI tool to look at where Kafka stores consumer group offsets:
 
 ```
-cd C:\kafka
-bin\windows\kafka-consumer-groups.bat --bootstrap-server localhost:9092 --describe --group transconsumergroup
+cd C:\kafka-docker
+docker compose exec kafka1 /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:19092 --describe --group transconsumergroup
 ```
 
 You will see output similar to this:
@@ -485,7 +475,34 @@ With both applications running, pick a single transaction and trace it through t
    Statistic -> PURCHASE         247.32
    ```
 
-You have now traced the lifecycle of one event: produced by the application, hashed to a partition by key, written to disk by the broker, fetched by the consumer, deserialized into a `Transaction`, transformed into a `TransactionStatistic`, and printed by the collector.
+You have now traced the lifecycle of one event: produced by the application, hashed to a partition by key, written to disk by the leader broker, replicated to the two follower brokers, fetched by the consumer, deserialized into a `Transaction`, transformed into a `TransactionStatistic`, and printed by the collector. The replication step is invisible from the application's perspective but is happening for every event behind the scenes.
+
+### 3.4 Stop a Broker While Both Apps Are Running
+
+This exercise demonstrates the durability you configured in Lab 4.2's producer and saw in action in Lab 4.1's broker-stop exercise. Now you can see what it looks like from the application's perspective.
+
+With both producer and consumer running, open a Command Prompt:
+
+```
+cd C:\kafka-docker
+docker compose stop kafka2
+```
+
+Watch the producer and consumer logs.
+
+**The producer** may briefly log warnings as it loses its connection to broker 2, but it will continue to publish successfully. The cluster still has two brokers, every partition still has a leader, `min.insync.replicas=2` is still satisfied (because writes only need 2 in-sync replicas, and we have 2), and `acks=all` is achievable.
+
+**The consumer** may briefly log a rebalance message, but it will continue to receive transactions. Some partitions may have been led by broker 2; new leaders were elected for them on brokers 1 and 3.
+
+This is the value of running against a real multi-broker cluster: the production-grade durability and availability story is real, not hypothetical. Your Spring producer and consumer kept working through a broker outage with no code changes and no operator intervention.
+
+Bring the broker back when you're done:
+
+```
+docker compose start kafka2
+```
+
+Wait 30 seconds for it to rejoin, then continue.
 
 ## Section 4: Wrapping Up
 
@@ -493,8 +510,8 @@ You have now traced the lifecycle of one event: produced by the application, has
 
 For Lab 4.4, you will need:
 
-- The Kafka broker still running (or be prepared to restart it)
-- The `transactions` topic — it persists as long as the broker's storage is intact
+- The three-broker Kafka cluster still running (or be prepared to restart it)
+- The `transactions` topic — it persists as long as the cluster's storage is intact
 - Both your producer and consumer projects available to run
 
 You can stop the producer and consumer applications. They will be reused (or the consumer modified) in the next lab.
@@ -510,9 +527,10 @@ In this lab you have:
 - Transformed an incoming event into a smaller domain-specific record
 - Separated the listener from the output destination using an interface
 - Observed the partition, key, and offset of each record
-- Verified end-to-end producer-to-consumer flow
+- Verified end-to-end producer-to-consumer flow through a three-broker cluster
+- Seen the cluster keep both producer and consumer working through a broker outage
 
-The conceptual foundation for the next lab is now in place. The `StatisticsCollector` interface is the seam where Lab 4.4 will plug in a database-backed implementation. The listener, the deserialization configuration, the consumer group setup, and the transformation logic will all stay the same. Only the collector changes, and the rest of the application does not know or care.
+The conceptual foundation for the next lab is now in place. The `StatisticsCollector` interface is the seam where Lab 4.4 will plug in a file-writing implementation. The listener, the deserialization configuration, the consumer group setup, and the transformation logic will all stay the same. Only the collector changes, and the rest of the application does not know or care.
 
 ### 4.3 Self-Check
 
@@ -523,9 +541,10 @@ Before moving on to Lab 4.4, you should be able to answer these questions:
 3. Why do we configure `spring.json.use.type.headers: false` and `spring.json.value.default.type` in the consumer?
 4. What is the role of the `StatisticsCollector` interface? What makes this design easier to extend than calling `System.out.println` directly from the listener?
 5. The listener method takes a `ConsumerRecord<String, Transaction>`. What information does that give you that you would not have if the method just took a `Transaction`?
-6. How does Kafka know where each consumer group has read up to? Where is that information stored?
+6. How does Kafka know where each consumer group has read up to? Where is that information stored, and what does replication factor 3 on the internal offsets topic give you?
 7. If you stopped this consumer for an hour while the producer kept running, what would happen when you restarted the consumer?
 8. What does `spring.main.web-application-type: none` do, and why is it appropriate for both the producer and consumer in this course?
+9. In Section 3.4 you stopped one broker while both producer and consumer were running. Why did both keep working without any code changes?
 
 If any of these are unclear, review the relevant section of the lab before continuing.
 
