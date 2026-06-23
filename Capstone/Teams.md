@@ -13,14 +13,15 @@ Requests for changes will be accepted until the end of class June 22. As of June
 - Joseph
 - Avinash
 - Thomas
+- Vijayakumar
 
 ## Team 3:
 - Benjamin
 - Tanvi
-- Faisal
-- Vijayakumar
+- Suresh
+
 
 ## Team 4:
 - Karthika
 - William
-- Suresh
+- Faisal
