@@ -1,8 +1,6 @@
 # Capstone Teams
 
-This is the list of teams as of June 22.
-
-Requests for changes will be accepted until the end of class June 22. As of June 23, the team memberships will be final.
+This is the list of teams as of June 24.
 
 ## Team 1:
 - Ehsan
@@ -16,11 +14,11 @@ Requests for changes will be accepted until the end of class June 22. As of June
 - Faisal
 
 ## Team 3:
-- Benjamin
+- William
 - Tanvi
 - Suresh
 
 ## Team 4:
 - Karthika
-- William
+- Benjamin
 - Vijayakumar
