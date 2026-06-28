@@ -1,6 +1,6 @@
-# Capstone Supplement: API Contract and Endpoint Security
+# Capstone Specification: API Contract and Endpoint Security
 
-#### Draft v0.2 (for instructor review)
+#### Version 1,0 - June 29
 
 This supplement defines the BankService (bankapi) REST contract and the
 authorization rules for each endpoint. The BFF passes these requests through
@@ -13,7 +13,7 @@ inactive-account case).*
 
 ---
 
-## Assumptions applied in this draft
+## Assumptions applied in this sspec
 
 - Two roles only: `account_holder` and `teller`. No other roles are used.
 - Customers authenticate with their `customer_number` (for example `487-978493`).
